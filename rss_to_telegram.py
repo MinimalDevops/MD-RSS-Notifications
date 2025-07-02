@@ -7,6 +7,8 @@ import feedparser
 import os
 import ssl
 from dotenv import load_dotenv
+import re
+from html import unescape
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +27,58 @@ if not os.path.exists(STORAGE_DIR):
 EXCEL_FILE_PATH = os.getenv('RSS_EXCEL_PATH', os.path.join(os.path.dirname(__file__), 'rss_channels.xlsx'))
 if not os.path.exists(EXCEL_FILE_PATH):
     raise FileNotFoundError(f"Excel file not found at: {EXCEL_FILE_PATH}")
+
+def get_entry_date(entry):
+    """Extract publication date from an RSS entry handling different date field names."""
+    date_fields = ['published', 'pubDate', 'updated', 'created', 'date']
+    
+    for field in date_fields:
+        if hasattr(entry, field):
+            try:
+                return parser.parse(getattr(entry, field))
+            except (ValueError, TypeError) as e:
+                print(f"Error parsing date from field '{field}': {e}")
+                continue
+    
+    # If no valid date field is found
+    print(f"Warning: No valid date field found in entry: {entry.title if hasattr(entry, 'title') else 'Unknown title'}")
+    return None
+
+def clean_html_content(text):
+    """Clean HTML content for Telegram compatibility."""
+    if not text:
+        return ""
+    
+    # Unescape HTML entities
+    text = unescape(text)
+    
+    # Remove unsupported HTML tags but keep their content
+    text = re.sub(r'<p.*?>', '\n\n', text)
+    text = re.sub(r'</p>', '', text)
+    text = re.sub(r'<br.*?>', '\n', text)
+    text = re.sub(r'<.*?>', '', text)  # Remove any other HTML tags
+    
+    # Clean up multiple newlines
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
+    text = text.strip()
+    
+    return text
+
+def format_telegram_message(entry):
+    """Format the message for Telegram with proper HTML tags."""
+    title = entry.title if hasattr(entry, 'title') else "No title"
+    description = entry.description if hasattr(entry, 'description') else ""
+    link = entry.link if hasattr(entry, 'link') else ""
+    
+    # Clean the content
+    clean_description = clean_html_content(description)
+    
+    # Format message with only supported HTML tags
+    msg = f"<b>{title}</b>\n\n{clean_description}"
+    if link:
+        msg += f"\n\n<a href=\"{link}\">Read more</a>"
+    
+    return msg
 
 # Function to read the Excel file and return a dictionary mapping RSS links to channel IDs and last published dates
 def load_feed_channel_map(excel_file):
@@ -89,7 +143,6 @@ def main():
 
             # Parse the last published date from the Excel file
             last_update = parser.parse(last_published_date_str)
-
             last_published_date = last_update
 
             # Parse RSS feed
@@ -99,22 +152,25 @@ def main():
             for entry in reversed(rss_feed.entries):
                 try:
                     # Get entry published date
-                    entry_published_date = parser.parse(entry.published)
+                    entry_published_date = get_entry_date(entry)
+                    if not entry_published_date:
+                        continue
+                        
                     print(f"Entry published date: {entry_published_date}")
 
                     # Check if entry is newer than the last update date
                     if entry_published_date > last_update:
-                        # Build message to send
-                        msg = f'<b>{entry.title}</b>\n\n{entry.description}\n\n <a href="{entry.link}">Read more</a>'
+                        # Format message with proper HTML
+                        msg = format_telegram_message(entry)
 
                         # Send message to each channel
                         try:
                             # Check if entry has an image and send image with caption if possible
-                            if len(entry.links) > 1 and entry.links[1].href:
+                            if hasattr(entry, 'links') and len(entry.links) > 1 and entry.links[1].href:
                                 send_message(channel_id, msg, entry.links[1].href)
                             else:
                                 send_message(channel_id, msg)
-                            print(f'Sent {entry.links[0].href}')
+                            print(f'Sent {entry.link if hasattr(entry, "link") else "Unknown link"}')
                         except Exception as err:
                             print(f"An error occurred while sending a message to {channel_id}: {err}")
 
